@@ -28,9 +28,67 @@ public class WarehouseService(IConfiguration configuration) : IWarehouseService
         await using var connection = await GetConnection();
         await using var transaction = await connection.BeginTransactionAsync();
 
-
         try
         {
+            string createProcedureSql =
+                @"IF NOT EXISTS (SELECT * FROM sys.procedures WHERE name = 'AddProductToWarehouse')
+                    BEGIN
+                        EXEC('
+                        CREATE PROCEDURE AddProductToWarehouse 
+                            @IdProduct INT, 
+                            @IdWarehouse INT, 
+                            @Amount INT,  
+                            @CreatedAt DATETIME
+                        AS  
+                        BEGIN  
+                           
+                         DECLARE @IdProductFromDb INT, @IdOrder INT, @Price DECIMAL(5,2);  
+                          
+                         SELECT TOP 1 @IdOrder = o.IdOrder  
+                         FROM [Order] o   
+                         LEFT JOIN Product_Warehouse pw ON o.IdOrder=pw.IdOrder  
+                         WHERE o.IdProduct=@IdProduct AND o.Amount=@Amount AND pw.IdProductWarehouse IS NULL AND  
+                         o.CreatedAt<@CreatedAt;  
+                          
+                         SELECT @IdProductFromDb=Product.IdProduct, @Price=Product.Price FROM Product WHERE IdProduct=@IdProduct  
+                           
+                         IF @IdProductFromDb IS NULL  
+                         BEGIN  
+                          RAISERROR('Invalid parameter: Provided IdProduct does not exist', 18, 0);  
+                          RETURN;  
+                         END;  
+                          
+                         IF @IdOrder IS NULL  
+                         BEGIN  
+                          RAISERROR('Invalid parameter: There is no order to fullfill', 18, 0);  
+                          RETURN;  
+                         END;  
+                           
+                         IF NOT EXISTS(SELECT 1 FROM Warehouse WHERE IdWarehouse=@IdWarehouse)  
+                         BEGIN  
+                          RAISERROR('Invalid parameter: Provided IdWarehouse does not exist', 18, 0);  
+                          RETURN;  
+                         END;  
+                          
+                         SET XACT_ABORT ON;  
+                         BEGIN TRAN;  
+                           
+                         UPDATE [Order] SET  
+                         FulfilledAt=@CreatedAt  
+                         WHERE IdOrder=@IdOrder;  
+                          
+                         INSERT INTO Product_Warehouse(IdWarehouse,   
+                         IdProduct, IdOrder, Amount, Price, CreatedAt)  
+                         VALUES(@IdWarehouse, @IdProduct, @IdOrder, @Amount, @Amount*@Price, @CreatedAt);  
+                           
+                         SELECT @@IDENTITY AS NewId;
+                           
+                         COMMIT;  
+                        END
+                        ');
+                    END";
+
+            await connection.ExecuteAsync(createProcedureSql);
             var returnedId = await connection.ExecuteScalarAsync<int>(
                 "AddProductToWarehouse",
                 new
@@ -43,16 +101,14 @@ public class WarehouseService(IConfiguration configuration) : IWarehouseService
                 commandType: CommandType.StoredProcedure,
                 transaction: transaction
             );
-            
 
 
             await transaction.CommitAsync();
-        var response = new WarehouseResponseDTO
-        {
-            NewId = returnedId
-        };
-        return response;
-        
+            var response = new WarehouseResponseDTO
+            {
+                NewId = returnedId
+            };
+            return response;
         }
         catch (Exception)
         {
